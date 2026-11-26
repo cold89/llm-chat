@@ -51,7 +51,7 @@ async function getDocument(forceRefresh = false) {
 
 async function askWithDocument(message, previousInteractionId, doc) {
   return ai.interactions.create({
-    model: 'gemini-3.8-flash',
+    model: process.env.GEMINI_MODEL || 'gemini-3.8-flash',
     input: [
       {
         type: 'document',
@@ -60,7 +60,8 @@ async function askWithDocument(message, previousInteractionId, doc) {
       },
       {
         type: 'text',
-        text: `Analyze the attached document carefully to answer the user's question. If something is not in the document, say so clearly.\n\nUser question: ${message}`,
+        text: `Analyze the attached document carefully to answer the user's question. 
+        If something is not in the document, say so clearly.\n\nUser question: ${message}`,
       },
     ],
     ...(previousInteractionId ? { previous_interaction_id: previousInteractionId } : {}),
