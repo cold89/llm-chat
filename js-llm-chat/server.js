@@ -2,12 +2,16 @@
 import fs from 'node:fs';
 import pdfParse from 'pdf-parse';
 import dotenv from 'dotenv';
+import express from 'express';
 
 import { GoogleGenAI } from '@google/genai';
 import { RecursiveCharacterTextSplitter } from "@langchain/textsplitters";
 
 dotenv.config();
 
+const app = express();
+app.use(express.json());
+app.use(express.static('public'));// Serves index.html from the project root
 
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 const EMBEDDING_MODEL = 'gemini-embedding-001';
@@ -142,7 +146,12 @@ export async function buildPolicyIndex(pdfPath = './docs/sample-healthcare-polic
 }
 
 // 4. Retrieve top-k chunks and generate a grounded answer
-export async function answerPolicyQuestion(question, indexedChunks, topK = 3) {
+export async function answerPolicyQuestion(
+  question,
+  indexedChunks,
+  topK = 3,
+  previousInteractionId = null
+) {
   const queryEmbedding = await embedText(question, 'RETRIEVAL_QUERY');
 
   const ranked = indexedChunks
@@ -159,36 +168,57 @@ export async function answerPolicyQuestion(question, indexedChunks, topK = 3) {
         `[${idx + 1}] (${c.sectionTitle} | score: ${c.score.toFixed(3)})\n${c.text}`
     )
     .join('\n\n---\n\n');
-  try {
-    const response = await ai.models.generateContent({
-      model: CHAT_MODEL,
-      contents: `You are a healthcare policy assistant. Answer ONLY using the policy excerpts below.
+
+  const prompt = `You are a healthcare policy assistant. Answer ONLY using the policy excerpts below.
 If the policy excerpts do not contain the answer, respond: "Not found in the provided policy document."
 Cite the section title for every factual claim.
 
 Policy Excerpts:
 ${contextBlock}
 
-User Question: ${question}`,
+User Question: ${question}`;
+
+  const interaction = await ai.interactions.create({
+    model: CHAT_MODEL,
+    input: prompt,
+    ...(previousInteractionId ? { previous_interaction_id: previousInteractionId } : {}),
+  });
+
+  return {
+    answer: interaction.output_text,
+    interactionId: interaction.id,
+    sources: ranked.map(({ id, sectionTitle, score }) => ({ id, sectionTitle, score })),
+  };
+}
+
+const policyIndex = await buildPolicyIndex();
+
+app.post('/api/chat', async (req, res) => {
+  try {
+    const { message, previousInteractionId } = req.body;
+    if (!message || typeof message !== 'string') {
+      return res.status(400).json({ error: 'Message is required.' });
+    }
+
+    const result = await answerPolicyQuestion(
+      message,
+      policyIndex,
+      3,
+      previousInteractionId
+    );
+
+    res.json({
+      reply: result.answer,
+      interactionId: result.interactionId,
+      sources: result.sources,
     });
-
-    return {
-      answer: response.text,
-      sources: ranked.map(({ id, sectionTitle, score }) => ({ id, sectionTitle, score })),
-    };
-  } catch (e) {
-    console.error("---------->>", e)
+  } catch (err) {
+    console.error('Chat error:', err);
+    res.status(500).json({ error: err.message || 'Failed to generate response.' });
   }
-}
+});
 
-// Quick test runner
-if (process.argv[1]?.endsWith('server.js')) {
-  const index = await buildPolicyIndex();
-  console.log(`Indexed ${index.length} chunks.`);
-
-  const q = process.argv.slice(2).join(' ') || 'what is Pre-Existing Diseases ?';
-  const result = await answerPolicyQuestion(q, index);
-  console.log('\nQuestion:', q);
-  console.log('\nAnswer:\n', result.answer);
-  console.log('\nTop Matches:', result.sources);
-}
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log(`Server running at http://localhost:${PORT}`);
+});
